@@ -175,11 +175,11 @@ const llmRetryStateSchema: zod.ZodType<LlmRetryState> = zod.record(zod.string(),
 })) as unknown as zod.ZodType<LlmRetryState>
 
 /**
- * Install provider-routed normal or unbounded request recovery.
+ * Install provider failover and provider-routed normal or unbounded request recovery.
  * Recovery admitted during activation awaits projection registration. A
  * registration failure propagates; cancellation or disposal suppresses retries.
  * @param ctx - plugin context that owns the listener and active waits.
- * @param config - empty executor config; provider registrations own policy.
+ * @param config - optional failover route overrides; provider registrations own retry policy.
  * @param internals - non-serializable deterministic hooks for tests.
  * @returns when recovery listeners and their projection are ready.
  */
@@ -315,14 +315,9 @@ export async function apply(ctx: Context, config: Config = {}, internals: RetryI
   ): Promise<RequestErrorAction> {
     const llmRetryProjectionHandle = await projectionReady
     if (signal.aborted || ctx.fiber.uid === null || lifetime.signal.aborted) return
-    const failover = await tryFailover(agent, turn, step, provider, failure, signal)
-    if (failover !== undefined) return failover
-    if (signal.aborted || ctx.fiber.uid === null || lifetime.signal.aborted) return
-    if (policy === undefined) return next()
-    if (policy.mode === 'always') {
+    if (policy?.mode === 'always') {
       const fusedSignal = AbortSignal.any([signal, lifetime.signal])
-      // The loop and plugin lifetime stay open until delegated recovery settles.
-      // An abort then wins before the decision or fallback can mutate later state.
+      // Preserve downstream-first composition for explicitly unbounded recovery.
       const downstream = await settleDownstream(next)
       if (fusedSignal.aborted) return
       if (downstream.type === 'error') {
@@ -334,10 +329,19 @@ export async function apply(ctx: Context, config: Config = {}, internals: RetryI
       if (downstream.type === 'decision' && downstream.decision?.kind === 'retry') {
         return downstream.decision
       }
-    } else if (!policy.retryableCodes.includes(failure.code)) {
-      return next()
+      const failover = await tryFailover(agent, turn, step, provider, failure, signal)
+      if (failover !== undefined) return failover
+      if (signal.aborted || ctx.fiber.uid === null || lifetime.signal.aborted) return
+    } else {
+      // Failover is independent of the source provider's same-route retry budget.
+      const failover = await tryFailover(agent, turn, step, provider, failure, signal)
+      if (failover !== undefined) return failover
+      if (signal.aborted || ctx.fiber.uid === null || lifetime.signal.aborted) return
+      if (policy === undefined) return next()
+      if (!policy.retryableCodes.includes(failure.code)) return next()
     }
 
+    if (policy === undefined) return next()
     const policyKey = retryPolicyKey(policy)
     const retryState = llmRetryProjectionHandle.stateOf(agent.session)
     const previous = retryState[retryStateKey(provider, policyKey)]
