@@ -17,7 +17,7 @@ import type {
 import SessionStore, { type SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session'
-import type { LlmRetryEventData } from '@deepseek-ai/dsh-llm-retry/types'
+import type { LlmFailoverEventData, LlmRetryEventData } from '@deepseek-ai/dsh-llm-retry/types'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
@@ -31,6 +31,10 @@ type ScriptEntry = Error | Iterable<StreamChunk> | AsyncIterable<StreamChunk>
 
 it('keeps the browser-safe retry payload identical to the session event', () => {
   expectTypeOf<LlmRetryEventData>().toEqualTypeOf<SessionEventMap['llm/retry']>()
+})
+
+it('keeps the browser-safe failover payload identical to the session event', () => {
+  expectTypeOf<LlmFailoverEventData>().toEqualTypeOf<SessionEventMap['llm/failover']>()
 })
 
 class ScriptedAdapter extends LlmAdapter {
@@ -50,11 +54,12 @@ class ScriptedAdapter extends LlmAdapter {
   }
 
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const id = ({
+    const modelIds: Readonly<Record<string, string>> = {
       groq: 'openai/gpt-oss-120b',
       google: 'gemini-3.8-flash',
       cerebras: 'gpt-oss-120b',
-    } as const)[provider as 'groq' | 'google' | 'cerebras']
+    }
+    const id = modelIds[provider]
     return Promise.resolve(id === undefined ? [] : [{ provider, id, name: id }])
   }
 
