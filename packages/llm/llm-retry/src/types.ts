@@ -49,14 +49,20 @@ export interface LlmRetryStartedEventData {
   retry: number
 }
 
-
 /** One provider/model route switch admitted after a retryable model-request failure. */
 export interface LlmFailoverEventData {
+  /** Open turn containing the failed model request. */
   turn: number
+  /** Step whose request was switched to another provider. */
   step: number
+  /** Provider route that produced the failure. */
   fromProvider: string
+  /** Model id that produced the failure. */
   fromModel: string
+  /** Provider route selected for the next attempt. */
   toProvider: string
+  /** Model id selected for the next attempt. */
   toModel: string
+  /** Structured failure that caused the route switch. */
   failure: LlmFailure
 }
