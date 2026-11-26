@@ -26,8 +26,8 @@ export const inject = ['agents', 'sessionProjections']
 export interface FailoverTarget {
   /** Registered provider route key. */
   readonly provider: string
-  /** Exact model id exposed by that provider. */
-  readonly model: string
+  /** Optional exact model id; omission selects the provider catalog's first listed chat model. */
+  readonly model?: string
 }
 
 /**
@@ -41,7 +41,7 @@ export interface Config {
 
 const failoverTargetSchema = z.object({
   provider: z.string().min(1).required(),
-  model: z.string().min(1).required(),
+  model: z.string().min(1),
 })
 
 /** Runtime schema for {@link Config}. */
@@ -49,19 +49,23 @@ export const Config = z.object({
   failoverRoutes: z.dict(z.array(failoverTargetSchema)),
 }) as unknown as z<Config>
 
-/** Default routes use provider-native ids with tool/function calling support. */
+/**
+ * Default routes deliberately leave model selection to each installed provider catalog.
+ * Catalog order is adapter-preferred and avoids pinning a model id that may age out
+ * between Harness releases.
+ */
 const DEFAULT_FAILOVER_ROUTES: Readonly<Record<string, readonly FailoverTarget[]>> = {
   openrouter: [
-    { provider: 'groq', model: 'openai/gpt-oss-120b' },
-    { provider: 'google', model: 'gemini-3.8-flash' },
-    { provider: 'cerebras', model: 'gpt-oss-120b' },
+    { provider: 'groq' },
+    { provider: 'google' },
+    { provider: 'cerebras' },
   ],
   groq: [
-    { provider: 'google', model: 'gemini-3.8-flash' },
-    { provider: 'cerebras', model: 'gpt-oss-120b' },
+    { provider: 'google' },
+    { provider: 'cerebras' },
   ],
   google: [
-    { provider: 'cerebras', model: 'gpt-oss-120b' },
+    { provider: 'cerebras' },
   ],
 }
 
@@ -294,23 +298,26 @@ export async function apply(ctx: Context, config: Config = {}, internals: RetryI
         continue
       }
       if (signal.aborted || lifetime.signal.aborted || ctx.fiber.uid === null) return
-      if (!models.some(model => model.id === target.model)) continue
+      const selectedModel = target.model === undefined
+        ? models[0]
+        : models.find(model => model.id === target.model)
+      if (selectedModel === undefined) continue
 
       const latest = agent.model.current()
       if (latest === undefined || latest.provider !== provider || latest.model !== selection.model) return
-      const nextSelection: ModelSelection = { provider: target.provider, model: target.model }
+      const nextSelection: ModelSelection = { provider: target.provider, model: selectedModel.id }
       agent.session.append('llm/failover', {
         turn,
         step,
         fromProvider: provider,
         fromModel: selection.model,
         toProvider: target.provider,
-        toModel: target.model,
+        toModel: selectedModel.id,
         failure,
       } satisfies LlmFailoverEventData)
       agent.model.select(nextSelection)
       ctx.logger.info(
-        `llm-retry: switching agent "${agent.id}" from "${provider}/${selection.model}" to "${target.provider}/${target.model}" after ${failure.code}`,
+        `llm-retry: switching agent "${agent.id}" from "${provider}/${selection.model}" to "${target.provider}/${selectedModel.id}" after ${failure.code}`,
       )
       return { kind: 'retry' }
     }
