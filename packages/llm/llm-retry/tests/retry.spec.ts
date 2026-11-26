@@ -39,6 +39,7 @@ it('keeps the browser-safe failover payload identical to the session event', () 
 
 class ScriptedAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
+  readonly unavailableProviders = new Set<string>()
   private retryPolicies: Readonly<Record<string, ResolvedRetryPolicy | undefined>> = {}
 
   constructor(private readonly entries: ScriptEntry[]) {
@@ -54,6 +55,7 @@ class ScriptedAdapter extends LlmAdapter {
   }
 
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    if (this.unavailableProviders.has(provider)) return Promise.resolve([])
     const modelIds: Readonly<Record<string, string>> = {
       groq: 'openai/gpt-oss-120b',
       google: 'gemini-flash-test',
@@ -327,6 +329,32 @@ describe('provider-routed retry policy', () => {
       content: [{ type: 'text', text: 'recovered on Cerebras' }],
       source: { kind: 'model', provider: 'cerebras', model: 'gpt-oss-120b' },
     })
+  })
+
+  it('skips a fallback provider with no configured catalog models', async () => {
+    const adapter = new ScriptedAdapter([
+      new LlmError('free-model daily limit reached', 'RATE_LIMIT', { status: 429 }),
+      textResponse('recovered on Gemini'),
+    ])
+    adapter.unavailableProviders.add('groq')
+    ;({ ctx: context } = await harness(adapter))
+    context.llm.registerAdapter(['openrouter', 'groq', 'google', 'cerebras'], adapter)
+    const agent = await context.agentLoop.create(brandString<SessionId>('provider-failover-skip'), {
+      provider: 'openrouter',
+      model: 'deepseek/deepseek-chat',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests.map(request => [request.provider, request.model])).toEqual([
+      ['openrouter', 'deepseek/deepseek-chat'],
+      ['google', 'gemini-flash-test'],
+    ])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/failover').map(event => [
+      event.data.fromProvider,
+      event.data.toProvider,
+    ])).toEqual([['openrouter', 'google']])
   })
 
   it('retries an EMPTY_RESPONSE error finish under the default retryable codes', async () => {
