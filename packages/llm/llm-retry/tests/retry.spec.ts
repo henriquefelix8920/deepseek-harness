@@ -331,6 +331,36 @@ describe('provider-routed retry policy', () => {
     })
   })
 
+  it('fails over the separate OpenRouter Free provider id to Groq', async () => {
+    const adapter = new ScriptedAdapter([
+      new LlmError('free-model daily limit reached', 'RATE_LIMIT', { status: 429 }),
+      textResponse('recovered on Groq'),
+    ])
+    ;({ ctx: context } = await harness(adapter))
+    context.llm.registerAdapter(['openrouter-free', 'groq'], adapter)
+    const agent = await context.agentLoop.create(brandString<SessionId>('provider-failover-openrouter-free'), {
+      provider: 'openrouter-free',
+      model: 'openai/gpt-oss-20b',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests.map(request => [request.provider, request.model])).toEqual([
+      ['openrouter-free', 'openai/gpt-oss-20b'],
+      ['groq', 'openai/gpt-oss-120b'],
+    ])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/failover').map(event => [
+      event.data.fromProvider,
+      event.data.toProvider,
+    ])).toEqual([['openrouter-free', 'groq']])
+    expect(agent.session.deriveMessages().at(-1)).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'recovered on Groq' }],
+      source: { kind: 'model', provider: 'groq', model: 'openai/gpt-oss-120b' },
+    })
+  })
+
   it('skips a fallback provider with no configured catalog models', async () => {
     const adapter = new ScriptedAdapter([
       new LlmError('free-model daily limit reached', 'RATE_LIMIT', { status: 429 }),
