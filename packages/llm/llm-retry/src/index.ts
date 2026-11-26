@@ -10,7 +10,7 @@ import type { Context, Events } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { z as zod } from 'zod'
 import type { Agent, ModelSelection, RequestErrorAction } from '@deepseek-ai/dsh-agent'
-import type { LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
+import type { LlmFailure, LlmModelInfo, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { RetryId } from './brand.ts'
@@ -282,7 +282,7 @@ export async function apply(ctx: Context, config: Config = {}, internals: RetryI
     for (const target of targets) {
       if (attempted.has(target.provider)) continue
       if (signal.aborted || lifetime.signal.aborted || ctx.fiber.uid === null) return
-      let models
+      let models: readonly LlmModelInfo[]
       try {
         // listModels returns no entries for routes whose credentials are not configured.
         models = await agent.ctx.llm.listModels(target.provider)
