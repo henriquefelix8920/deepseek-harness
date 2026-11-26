@@ -286,7 +286,11 @@ export async function apply(ctx: Context, config: Config = {}, internals: RetryI
       try {
         // listModels returns no entries for routes whose credentials are not configured.
         models = await agent.ctx.llm.listModels(target.provider)
-      } catch {
+      } catch (error: unknown) {
+        ctx.logger.debug(
+          `llm-retry: skipping unavailable failover route "${target.provider}": %o`,
+          error,
+        )
         continue
       }
       if (signal.aborted || lifetime.signal.aborted || ctx.fiber.uid === null) return
