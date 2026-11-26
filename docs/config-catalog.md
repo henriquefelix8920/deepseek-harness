@@ -2684,12 +2684,12 @@ export interface Config {
   readonly failoverRoutes?: Readonly<Record<string, readonly FailoverTarget[]>>
 }
 
-/** One exact provider/model route the agent may use after a transient failure. */
+/** One provider route the agent may use after a transient failure. */
 export interface FailoverTarget {
   /** Registered provider route key. */
   readonly provider: string
-  /** Exact model id exposed by that provider. */
-  readonly model: string
+  /** Exact model id to pin; omission selects the provider catalog's first listed chat model. */
+  readonly model?: string
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-llm-retry -->
