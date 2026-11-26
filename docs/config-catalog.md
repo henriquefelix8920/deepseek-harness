@@ -2688,7 +2688,7 @@ export interface Config {
 export interface FailoverTarget {
   /** Registered provider route key. */
   readonly provider: string
-  /** Exact model id to pin; omission selects the provider catalog's first listed chat model. */
+  /** Exact model id to pin; omission selects the provider catalog's first listed model. */
   readonly model?: string
 }
 ```
