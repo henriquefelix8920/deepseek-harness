@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Mount `@deepseek-ai/dsh-llm-retry` to retry failed model requests at durable agent-step boundaries. Provider `retryPolicy` settings choose bounded normal-mode retries or unlimited always-mode retries; scheduled attempts reach the session log before backoff, and cancellation leaves consistent history. Retries re-run the failed step in the same open turn, while direct `ctx.llm.stream()` calls remain single-attempt. Each retry is another billed provider request, and always mode continues until success, cancellation, or disposal.
+Mount `@deepseek-ai/dsh-llm-retry` to recover failed model requests at durable agent-step boundaries. Provider `retryPolicy` settings choose bounded normal-mode retries or unlimited always-mode retries; the executor can also fail over from OpenRouter to configured Groq, Gemini, and Cerebras routes. Route changes and scheduled retries are recorded in the session log before the next attempt. Direct `ctx.llm.stream()` calls remain single-attempt.
 
 ## Table of Contents
 
@@ -25,11 +25,11 @@ Mount `@deepseek-ai/dsh-llm-retry` to retry failed model requests at durable age
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount this plugin when agent runs should recover from transient model-request failures — rate limits, server errors, timeouts, transport errors — instead of ending the turn. It is the executor: the retry policy itself lives on each provider adapter's configuration, and this package has no configuration of its own.
+Mount this plugin when agent runs should recover from transient model-request failures — rate limits, server errors, timeouts, transport errors — instead of ending the turn. Same-provider retry policy lives on each provider adapter's configuration; `llm-retry` also accepts optional `failoverRoutes` overrides for cross-provider fallback.
 
 ### When to choose it
 
-Choose it when a composition runs the agent loop and wants durable request recovery. The plugin is a function plugin with no config; provider adapters such as `dsh-llm-deepseek` and `dsh-llm-pi-ai` own the `retryPolicy` for their routes, and multi-provider adapters place it inside each provider profile. Skip it when calls go through `ctx.llm.stream()` directly without the agent loop: those consumers remain single-attempt because a raw stream cannot separate already-emitted chunks durably.
+Choose it when a composition runs the agent loop and wants durable request recovery. Provider adapters such as `dsh-llm-deepseek` and `dsh-llm-pi-ai` own the `retryPolicy` for their routes, and multi-provider adapters place it inside each provider profile. Skip it when calls go through `ctx.llm.stream()` directly without the agent loop: those consumers remain single-attempt because a raw stream cannot separate already-emitted chunks durably.
 
 ### Minimal configuration
 
@@ -106,7 +106,7 @@ The executor is built on one rule: **durable before wait, open-step boundaries.*
 
 | File | Role |
 |---|---|
-| [`src/index.ts`](src/index.ts) | The function plugin: waterfall listener, policy lookup, backoff, durable event appends |
+| [`src/index.ts`](src/index.ts) | The function plugin: waterfall listener, failover routing, policy lookup, backoff, durable event appends |
 | [`src/types.ts`](src/types.ts) | Browser-safe `llm/retry` and `llm/retry-started` event payload types |
 | [`src/brand.ts`](src/brand.ts) | The `RetryId` brand shared by the event payloads |
 
