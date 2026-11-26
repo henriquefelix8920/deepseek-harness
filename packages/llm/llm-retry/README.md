@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Mount `@deepseek-ai/dsh-llm-retry` to recover failed model requests at durable agent-step boundaries. Provider `retryPolicy` settings choose bounded normal-mode retries or unlimited always-mode retries; the executor can also fail over from OpenRouter to configured Groq, Gemini, and Cerebras routes. Route changes and scheduled retries are recorded in the session log before the next attempt. Direct `ctx.llm.stream()` calls remain single-attempt.
+Mount `@deepseek-ai/dsh-llm-retry` to retry failed model requests at durable agent-step boundaries. Provider `retryPolicy` settings choose bounded normal-mode retries or unlimited always-mode retries; scheduled attempts reach the session log before backoff, and cancellation leaves consistent history. Retries re-run the failed step in the same open turn, while direct `ctx.llm.stream()` calls remain single-attempt. Each retry is another billed provider request, and always mode continues until success, cancellation, or disposal.
 
 ## Table of Contents
 
@@ -25,11 +25,11 @@ Mount `@deepseek-ai/dsh-llm-retry` to recover failed model requests at durable a
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount this plugin when agent runs should recover from transient model-request failures — rate limits, server errors, timeouts, transport errors — instead of ending the turn. Same-provider retry policy lives on each provider adapter's configuration; `llm-retry` also accepts optional `failoverRoutes` overrides for cross-provider fallback.
+Mount this plugin when agent runs should recover from transient model-request failures — rate limits, server errors, timeouts, transport errors — instead of ending the turn. It is the executor: the retry policy itself lives on each provider adapter's configuration, and this package has no configuration of its own.
 
 ### When to choose it
 
-Choose it when a composition runs the agent loop and wants durable request recovery. Provider adapters such as `dsh-llm-deepseek` and `dsh-llm-pi-ai` own the `retryPolicy` for their routes, and multi-provider adapters place it inside each provider profile. Skip it when calls go through `ctx.llm.stream()` directly without the agent loop: those consumers remain single-attempt because a raw stream cannot separate already-emitted chunks durably.
+Choose it when a composition runs the agent loop and wants durable request recovery. The plugin is a function plugin with no config; provider adapters such as `dsh-llm-deepseek` and `dsh-llm-pi-ai` own the `retryPolicy` for their routes, and multi-provider adapters place it inside each provider profile. Skip it when calls go through `ctx.llm.stream()` directly without the agent loop: those consumers remain single-attempt because a raw stream cannot separate already-emitted chunks durably.
 
 ### Minimal configuration
 
@@ -48,37 +48,6 @@ Choose it when a composition runs the agent loop and wants durable request recov
 ```
 
 Omission of `retryPolicy` uses normal mode: five retries for `EMPTY_RESPONSE`, `RATE_LIMIT`, `SERVER`, `TIMEOUT`, and `TRANSPORT`, with bounded exponential backoff from 500 ms to 10 seconds and 10 percent jitter. Normal mode can change its finite budget, eligible codes, and backoff; always mode asks downstream recovery first, then retries every model-request failure without an attempt limit, stopping only on success, cancellation, or plugin disposal.
-
-### Automatic provider failover
-
-The default failover chain is **OpenRouter → Groq → Gemini → Cerebras**. It uses these provider/model pairs:
-
-| Provider ID | Fallback model ID |
-|---|---|
-| `groq` | `openai/gpt-oss-120b` |
-| `google` | `gemini-3.8-flash` |
-| `cerebras` | `gpt-oss-120b` |
-
-Failover is considered for rate limits (including HTTP 429/quota responses), server errors, timeouts, transport failures, and empty responses. It does not hide authentication, invalid-request, or model-not-found errors.
-
-**Configure the three providers once before relying on automatic failover.** In **Settings → Models → Add model provider**, add provider IDs `groq`, `google`, and `cerebras`, and save their respective API keys. The Harness stores credentials in its credential store; no key belongs in this plugin configuration. The fallback executor checks the configured model catalog before switching: providers with no saved credential or without the configured model are skipped. The next eligible configured route is tried instead.
-
-The default route map can be overridden in the `llm-retry` plugin configuration. This replaces the targets for the named source provider while preserving defaults for other source providers:
-
-```yaml
-- name: '@deepseek-ai/dsh-llm-retry'
-  config:
-    failoverRoutes:
-      openrouter:
-        - provider: groq
-          model: openai/gpt-oss-120b
-        - provider: google
-          model: gemini-3.8-flash
-        - provider: cerebras
-          model: gpt-oss-120b
-```
-
-Each provider's own `retryPolicy` still controls same-provider retries after failover candidates have been exhausted or skipped. Every cross-provider switch appends a durable `llm/failover` event and a `model/selection` event; the next `request/header` records the exact provider and model that served the request.
 
 ### What you can observe
 
@@ -106,7 +75,7 @@ The executor is built on one rule: **durable before wait, open-step boundaries.*
 
 | File | Role |
 |---|---|
-| [`src/index.ts`](src/index.ts) | The function plugin: waterfall listener, failover routing, policy lookup, backoff, durable event appends |
+| [`src/index.ts`](src/index.ts) | The function plugin: waterfall listener, policy lookup, backoff, durable event appends |
 | [`src/types.ts`](src/types.ts) | Browser-safe `llm/retry` and `llm/retry-started` event payload types |
 | [`src/brand.ts`](src/brand.ts) | The `RetryId` brand shared by the event payloads |
 
@@ -114,7 +83,7 @@ The executor is built on one rule: **durable before wait, open-step boundaries.*
 
 The recovery listener is installed before awaiting projection registration. Failures arriving during activation wait for the reader before applying the provider policy. Registration failure propagates to the agent; cancellation or plugin disposal while waiting prevents retry records and further attempts.
 
-A failed step arrives on the waterfall with its provider and resolved policy. Always mode settles downstream recovery first and honors a downstream `retry` decision; normal mode first checks that the failure code is eligible and the budget is not exhausted. The plugin computes the delay — provider `Retry-After` when valid and within bounds, otherwise local bounded exponential backoff with symmetric jitter — appends the `llm/retry` event, waits on a cancellable timer, appends `llm/retry-started`, and returns `{ kind: 'retry' }`. A same-provider retry re-runs the failed step inside the same open turn over the same durable history. A failover first records a new model selection; the loop then prepares and records the new provider/model header before dispatch.
+A failed step arrives on the waterfall with its provider and resolved policy. Always mode settles downstream recovery first and honors a downstream `retry` decision; normal mode first checks that the failure code is eligible and the budget is not exhausted. The plugin computes the delay — provider `Retry-After` when valid and within bounds, otherwise local bounded exponential backoff with symmetric jitter — appends the `llm/retry` event, waits on a cancellable timer, appends `llm/retry-started`, and returns `{ kind: 'retry' }`. The loop then re-runs the failed step inside the same open turn over the same durable history.
 
 ### Waterfall composition
 
@@ -165,8 +134,7 @@ These limits define where the executor stops and future work begins. They are cu
 - **Always mode retries permanent failures** — authentication, quota, invalid-request, protocol, and unrecoverable context errors continue until success, cancellation, or disposal; deployments own provider-specific cost and latency controls.
 - **Finite plugin budgets add** — normal mode counts only its configured codes and exact provider policy, while context-overflow compaction owns a separate budget. Any overlapping policy must define registration-order behavior.
 - **Recovery policies compose by waterfall order** — always mode accepts a downstream retry before applying its fallback. A later policy that ignores cancellation and never settles also prevents fallback, turn quiescence, and plugin disposal from completing.
-- **`llm/retry` records retry scheduling, not completion** — later step and turn events establish success, exhaustion, or cancellation.
-- **Failover requires configured credentials and model ids** — missing or unavailable provider routes are skipped; failover never creates credentials or silently assumes a model is served.
+- **`llm/retry` records scheduling, not completion** — later step and turn events establish success, exhaustion, or cancellation.
 
 <a id="dev-note"></a>
 ### Dev Note
