@@ -51,6 +51,12 @@ function classifyPiAiError(message: string): BuiltinLlmFailureCode {
   if (/\b(?:401|403)\b/.test(statusSource)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b/.test(statusSource) || /rate.?limit/i.test(message)) return 'RATE_LIMIT'
+  // Groq reports TPM exhaustion as HTTP 413, but this is a quota window
+  // rather than a permanently oversized payload. Keep it eligible for
+  // cross-provider failover; ordinary body-size 413 responses remain invalid.
+  if (/\b413\b/.test(statusSource)
+    && /rate_limit_exceeded/i.test(message)
+    && /(tokens per minute|\bTPM\b|"type"\s*:\s*"tokens")/i.test(message)) return 'RATE_LIMIT'
   // A rejected request body (gateway or provider size cap): resending the
   // same request cannot succeed, so it is invalid, not transient.
   if (/\b413\b/.test(statusSource) || /failed to buffer the request body:\s*length limit exceeded|payload too large|request body too large/i.test(message)) return 'INVALID_REQUEST'

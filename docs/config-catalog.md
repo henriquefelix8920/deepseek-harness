@@ -2672,11 +2672,25 @@ export interface ReplayModelConfig {
 ## `@deepseek-ai/dsh-llm-retry`
 
 - `inject`: `agents` · `sessionProjections`
-- `source`: [`packages/llm/llm-retry/src/index.ts:26`](../packages/llm/llm-retry/src/index.ts)
+- `source`: [`packages/llm/llm-retry/src/index.ts:37`](../packages/llm/llm-retry/src/index.ts)
 
 ```ts config-catalog
-/** This policy executor has no config; providers own `retryPolicy`. */
-export type Config = Readonly<Record<string, never>>
+/**
+ * Optional provider failover overrides. The built-in OpenRouter → Groq → Gemini
+ * → Cerebras route order remains active unless a source provider is overridden.
+ */
+export interface Config {
+  /** Per-source-provider replacement targets, in failover order. */
+  readonly failoverRoutes?: Readonly<Record<string, readonly FailoverTarget[]>>
+}
+
+/** One provider route the agent may use after a transient failure. */
+export interface FailoverTarget {
+  /** Registered provider route key. */
+  readonly provider: string
+  /** Exact model id to pin; omission selects the provider catalog's first listed model. */
+  readonly model?: string
+}
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-llm-retry -->
 

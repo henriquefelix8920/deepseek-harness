@@ -8,6 +8,7 @@ import type {
   AlwaysRetryPolicyConfig,
   BackoffConfig,
   GenerateOptions,
+  LlmModelInfo,
   NormalRetryPolicyConfig,
   ResolvedRetryPolicy,
   RetryPolicyConfig,
@@ -16,7 +17,7 @@ import type {
 import SessionStore, { type SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { SessionEvent, SessionEventMap } from '@deepseek-ai/dsh-session'
-import type { LlmRetryEventData } from '@deepseek-ai/dsh-llm-retry/types'
+import type { LlmFailoverEventData, LlmRetryEventData } from '@deepseek-ai/dsh-llm-retry/types'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { defineContentToolFixture } from '@deepseek-ai/dsh-tool-testkit'
@@ -32,8 +33,13 @@ it('keeps the browser-safe retry payload identical to the session event', () => 
   expectTypeOf<LlmRetryEventData>().toEqualTypeOf<SessionEventMap['llm/retry']>()
 })
 
+it('keeps the browser-safe failover payload identical to the session event', () => {
+  expectTypeOf<LlmFailoverEventData>().toEqualTypeOf<SessionEventMap['llm/failover']>()
+})
+
 class ScriptedAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
+  readonly unavailableProviders = new Set<string>()
   private retryPolicies: Readonly<Record<string, ResolvedRetryPolicy | undefined>> = {}
 
   constructor(private readonly entries: ScriptEntry[]) {
@@ -46,6 +52,17 @@ class ScriptedAdapter extends LlmAdapter {
     if (entry === undefined) throw new Error('retry test script exhausted')
     if (entry instanceof Error) throw entry
     yield* entry
+  }
+
+  override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    if (this.unavailableProviders.has(provider)) return Promise.resolve([])
+    const modelIds: Readonly<Record<string, string>> = {
+      groq: 'openai/gpt-oss-120b',
+      google: 'gemini-flash-test',
+      cerebras: 'gpt-oss-120b',
+    }
+    const id = modelIds[provider]
+    return Promise.resolve(id === undefined ? [] : [{ provider, id, name: id }])
   }
 
   configureRetryPolicies(
@@ -252,6 +269,150 @@ describe('provider-routed retry policy', () => {
       content: [{ type: 'text', text: 'done' }],
       source: { kind: 'model', provider: 'mock', model: 'mock' },
     })
+  })
+
+  it('fails over OpenRouter → Groq → Gemini → Cerebras and records each route switch', async () => {
+    const adapter = new ScriptedAdapter([
+      new LlmError('free-model daily limit reached', 'RATE_LIMIT', { status: 429 }),
+      new LlmError('Groq temporarily unavailable', 'SERVER', { status: 503 }),
+      new LlmError('Gemini rate limit reached', 'RATE_LIMIT', { status: 429 }),
+      textResponse('recovered on Cerebras'),
+    ])
+    ;({ ctx: context } = await harness(adapter))
+    context.llm.registerAdapter(['openrouter', 'groq', 'google', 'cerebras'], adapter)
+    const agent = await context.agentLoop.create(brandString<SessionId>('provider-failover-chain'), {
+      provider: 'openrouter',
+      model: 'deepseek/deepseek-chat',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests.map(request => [request.provider, request.model])).toEqual([
+      ['openrouter', 'deepseek/deepseek-chat'],
+      ['groq', 'openai/gpt-oss-120b'],
+      ['google', 'gemini-flash-test'],
+      ['cerebras', 'gpt-oss-120b'],
+    ])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/failover').map(event => ({
+      from: [event.data.fromProvider, event.data.fromModel],
+      to: [event.data.toProvider, event.data.toModel],
+      code: event.data.failure.code,
+    }))).toEqual([
+      {
+        from: ['openrouter', 'deepseek/deepseek-chat'],
+        to: ['groq', 'openai/gpt-oss-120b'],
+        code: 'RATE_LIMIT',
+      },
+      {
+        from: ['groq', 'openai/gpt-oss-120b'],
+        to: ['google', 'gemini-flash-test'],
+        code: 'SERVER',
+      },
+      {
+        from: ['google', 'gemini-flash-test'],
+        to: ['cerebras', 'gpt-oss-120b'],
+        code: 'RATE_LIMIT',
+      },
+    ])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'request/header').map(event => [
+      event.data.header.config.provider,
+      event.data.header.config.model,
+    ])).toEqual([
+      ['openrouter', 'deepseek/deepseek-chat'],
+      ['groq', 'openai/gpt-oss-120b'],
+      ['google', 'gemini-flash-test'],
+      ['cerebras', 'gpt-oss-120b'],
+    ])
+    expect(agent.session.deriveMessages().at(-1)).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'recovered on Cerebras' }],
+      source: { kind: 'model', provider: 'cerebras', model: 'gpt-oss-120b' },
+    })
+  })
+
+  it('fails over the separate OpenRouter Free provider id to Groq', async () => {
+    const adapter = new ScriptedAdapter([
+      new LlmError('free-model daily limit reached', 'RATE_LIMIT', { status: 429 }),
+      textResponse('recovered on Groq'),
+    ])
+    ;({ ctx: context } = await harness(adapter))
+    context.llm.registerAdapter(['openrouter-free', 'groq'], adapter)
+    const agent = await context.agentLoop.create(brandString<SessionId>('provider-failover-openrouter-free'), {
+      provider: 'openrouter-free',
+      model: 'openai/gpt-oss-20b',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests.map(request => [request.provider, request.model])).toEqual([
+      ['openrouter-free', 'openai/gpt-oss-20b'],
+      ['groq', 'openai/gpt-oss-120b'],
+    ])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/failover').map(event => [
+      event.data.fromProvider,
+      event.data.toProvider,
+    ])).toEqual([['openrouter-free', 'groq']])
+    expect(agent.session.deriveMessages().at(-1)).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'recovered on Groq' }],
+      source: { kind: 'model', provider: 'groq', model: 'openai/gpt-oss-120b' },
+    })
+  })
+
+  it('skips a fallback provider with no configured catalog models', async () => {
+    const adapter = new ScriptedAdapter([
+      new LlmError('free-model daily limit reached', 'RATE_LIMIT', { status: 429 }),
+      textResponse('recovered on Gemini'),
+    ])
+    adapter.unavailableProviders.add('groq')
+    ;({ ctx: context } = await harness(adapter))
+    context.llm.registerAdapter(['openrouter', 'groq', 'google', 'cerebras'], adapter)
+    const agent = await context.agentLoop.create(brandString<SessionId>('provider-failover-skip'), {
+      provider: 'openrouter',
+      model: 'deepseek/deepseek-chat',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests.map(request => [request.provider, request.model])).toEqual([
+      ['openrouter', 'deepseek/deepseek-chat'],
+      ['google', 'gemini-flash-test'],
+    ])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/failover').map(event => [
+      event.data.fromProvider,
+      event.data.toProvider,
+    ])).toEqual([['openrouter', 'google']])
+  })
+
+  it('lets cancellation during failover admission win before model selection', async () => {
+    const adapter = new ScriptedAdapter([
+      new LlmError('free-model daily limit reached', 'RATE_LIMIT', { status: 429 }),
+      textResponse('must not run'),
+    ])
+    ;({ ctx: context } = await harness(adapter))
+    context.llm.registerAdapter(['openrouter', 'groq', 'google', 'cerebras'], adapter)
+    const agent = await context.agentLoop.create(brandString<SessionId>('provider-failover-cancel'), {
+      provider: 'openrouter',
+      model: 'deepseek/deepseek-chat',
+    })
+    context.on('session/event', (session, event) => {
+      if (session === agent.session && event.type === 'llm/failover') {
+        agent.cancel({ kind: 'user' })
+      }
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests.map(request => request.provider)).toEqual(['openrouter'])
+    expect(agent.model.current()).toMatchObject({
+      provider: 'openrouter',
+      model: 'deepseek/deepseek-chat',
+    })
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'model/selection')).toHaveLength(0)
   })
 
   it('retries an EMPTY_RESPONSE error finish under the default retryable codes', async () => {
@@ -1055,8 +1216,10 @@ describe('provider-routed retry policy', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('rejects retry policy configured on the executor instead of a provider', async () => {
+  it('accepts provider failover routes without moving retry policy off providers', async () => {
     expectTypeOf<{}>().toExtend<retryConfig>()
+    expectTypeOf<{ failoverRoutes: { openrouter: [{ provider: 'groq'; model: 'openai/gpt-oss-120b' }] } }>().toExtend<retryConfig>()
+    expectTypeOf<{ failoverRoutes: { openrouter: [{ provider: 'groq' }] } }>().toExtend<retryConfig>()
     expectTypeOf<{ retryPolicy: { mode: 'always' } }>().not.toExtend<retryConfig>()
     const ctx = new Context()
     new SessionProjectionRegistry(ctx)

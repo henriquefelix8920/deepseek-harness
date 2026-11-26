@@ -465,6 +465,7 @@ describe('PiAiAdapter provider routing', () => {
   it.each([
     [401, 'AUTH'],
     [400, 'INVALID_REQUEST'],
+    [413, 'INVALID_REQUEST'],
     [429, 'RATE_LIMIT'],
     [500, 'SERVER'],
   ] as const)('maps HTTP %s failures to %s', async (status, code) => {
@@ -472,6 +473,23 @@ describe('PiAiAdapter provider routing', () => {
     const ctx = await harness(server.url)
     const result = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
     expect(result.finish).toMatchObject({ kind: 'error', failure: { code } })
+    expect(server.paths).toEqual(['/chat/completions'])
+  })
+
+  it('classifies Groq TPM exhaustion returned as HTTP 413 as RATE_LIMIT', async () => {
+    const body = JSON.stringify({
+      message: 'Request too large on tokens per minute (TPM): Limit 8000, Requested 9544',
+      type: 'tokens',
+      code: 'rate_limit_exceeded',
+    })
+    const server = await mockServer([{ status: 413, body }])
+    const ctx = await harness(server.url)
+    const result = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
+
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { message: expect.stringContaining('rate_limit_exceeded'), code: 'RATE_LIMIT' },
+    })
     expect(server.paths).toEqual(['/chat/completions'])
   })
 
