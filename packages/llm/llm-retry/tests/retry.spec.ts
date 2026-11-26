@@ -357,6 +357,34 @@ describe('provider-routed retry policy', () => {
     ])).toEqual([['openrouter', 'google']])
   })
 
+  it('lets cancellation during failover admission win before model selection', async () => {
+    const adapter = new ScriptedAdapter([
+      new LlmError('free-model daily limit reached', 'RATE_LIMIT', { status: 429 }),
+      textResponse('must not run'),
+    ])
+    ;({ ctx: context } = await harness(adapter))
+    context.llm.registerAdapter(['openrouter', 'groq', 'google', 'cerebras'], adapter)
+    const agent = await context.agentLoop.create(brandString<SessionId>('provider-failover-cancel'), {
+      provider: 'openrouter',
+      model: 'deepseek/deepseek-chat',
+    })
+    context.on('session/event', (session, event) => {
+      if (session === agent.session && event.type === 'llm/failover') {
+        agent.cancel({ kind: 'user' })
+      }
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests.map(request => request.provider)).toEqual(['openrouter'])
+    expect(agent.model.current()).toMatchObject({
+      provider: 'openrouter',
+      model: 'deepseek/deepseek-chat',
+    })
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'model/selection')).toHaveLength(0)
+  })
+
   it('retries an EMPTY_RESPONSE error finish under the default retryable codes', async () => {
     vi.useFakeTimers()
     const adapter = new ScriptedAdapter([
