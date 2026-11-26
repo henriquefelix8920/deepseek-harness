@@ -435,11 +435,15 @@ export class ReactLoopAgent implements Agent {
     signal.throwIfAborted()
 
     const { assembly } = decision
+    // Recovery listeners may durably select another provider/model before returning
+    // a retry action. Re-read that selection at each attempt so failover is reflected
+    // in prepareCall() and the next request/header snapshot.
+    let selection: Readonly<ModelSelection> = decision.selection
     let firstAttempt = true
     while (true) {
-      const { config, preparedCall } = await this.prepareRequest(turn, step, decision.selection, signal)
+      const { config, preparedCall } = await this.prepareRequest(turn, step, selection, signal)
       const currentContext = this.loopCtx.systemPrompt.refreshContext(assembly, {
-        ...assembleContextFor(this, signal), modelSelection: decision.selection,
+        ...assembleContextFor(this, signal), modelSelection: selection,
       })
       const sections = renderContextSections(currentContext)
       const context = this.runtimeContext.project(sections)
@@ -550,6 +554,7 @@ export class ReactLoopAgent implements Agent {
           if (action?.kind !== 'retry') {
             throw LlmError.fromFailure(finish.failure)
           }
+          selection = this.model.current() ?? selection
           continue
         }
 
