@@ -54,12 +54,16 @@ export const Config = z.object({
  * Catalog order is adapter-preferred and avoids pinning a model id that may age out
  * between Harness releases.
  */
+const OPENROUTER_FAILOVER_TARGETS: readonly FailoverTarget[] = [
+  { provider: 'groq' },
+  { provider: 'google' },
+  { provider: 'cerebras' },
+]
+
 const DEFAULT_FAILOVER_ROUTES: Readonly<Record<string, readonly FailoverTarget[]>> = {
-  openrouter: [
-    { provider: 'groq' },
-    { provider: 'google' },
-    { provider: 'cerebras' },
-  ],
+  // OpenRouter's standard and free catalog routes are separate provider ids.
+  openrouter: OPENROUTER_FAILOVER_TARGETS,
+  'openrouter-free': OPENROUTER_FAILOVER_TARGETS,
   groq: [
     { provider: 'google' },
     { provider: 'cerebras' },
