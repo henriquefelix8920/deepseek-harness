@@ -475,6 +475,23 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/chat/completions'])
   })
 
+  it('classifies Groq TPM exhaustion returned as HTTP 413 as RATE_LIMIT', async () => {
+    const body = JSON.stringify({
+      message: 'Request too large on tokens per minute (TPM): Limit 8000, Requested 9544',
+      type: 'tokens',
+      code: 'rate_limit_exceeded',
+    })
+    const server = await mockServer([{ status: 413, body }])
+    const ctx = await harness(server.url)
+    const result = await assemble(ctx, { model: 'deepseek-flash', messages: [] })
+
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { message: expect.stringContaining('rate_limit_exceeded'), code: 'RATE_LIMIT' },
+    })
+    expect(server.paths).toEqual(['/chat/completions'])
+  })
+
   it('classifies a gateway 500 that relays an upstream 401 as SERVER with the rendered message', async () => {
     vi.stubEnv('PI_TEST_KEY', 'test-key')
     // The Anthropic SDK renders the whole JSON body after the gateway's own status.
