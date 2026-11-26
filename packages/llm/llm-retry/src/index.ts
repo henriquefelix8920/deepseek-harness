@@ -26,7 +26,7 @@ export const inject = ['agents', 'sessionProjections']
 export interface FailoverTarget {
   /** Registered provider route key. */
   readonly provider: string
-  /** Optional exact model id; omission selects the provider catalog's first listed chat model. */
+  /** Optional exact model id; omission selects the provider catalog's first listed model. */
   readonly model?: string
 }
 
