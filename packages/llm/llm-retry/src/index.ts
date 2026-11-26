@@ -16,7 +16,7 @@ import { brandString } from '@deepseek-ai/dsh-brand'
 import type { RetryId } from './brand.ts'
 import type { LlmFailoverEventData, LlmRetryEventData } from './types.ts'
 
-export type { LlmRetryEventData, LlmRetryStartedEventData } from './types.ts'
+export type { LlmFailoverEventData, LlmRetryEventData, LlmRetryStartedEventData } from './types.ts'
 export { RetryId } from './brand.ts'
 
 export const name = 'llm-retry'
