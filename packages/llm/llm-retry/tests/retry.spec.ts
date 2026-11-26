@@ -56,7 +56,7 @@ class ScriptedAdapter extends LlmAdapter {
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const modelIds: Readonly<Record<string, string>> = {
       groq: 'openai/gpt-oss-120b',
-      google: 'gemini-3.8-flash',
+      google: 'gemini-flash-test',
       cerebras: 'gpt-oss-120b',
     }
     const id = modelIds[provider]
@@ -289,7 +289,7 @@ describe('provider-routed retry policy', () => {
     expect(adapter.requests.map(request => [request.provider, request.model])).toEqual([
       ['openrouter', 'deepseek/deepseek-chat'],
       ['groq', 'openai/gpt-oss-120b'],
-      ['google', 'gemini-3.8-flash'],
+      ['google', 'gemini-flash-test'],
       ['cerebras', 'gpt-oss-120b'],
     ])
     expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/failover').map(event => ({
@@ -304,11 +304,11 @@ describe('provider-routed retry policy', () => {
       },
       {
         from: ['groq', 'openai/gpt-oss-120b'],
-        to: ['google', 'gemini-3.8-flash'],
+        to: ['google', 'gemini-flash-test'],
         code: 'SERVER',
       },
       {
-        from: ['google', 'gemini-3.8-flash'],
+        from: ['google', 'gemini-flash-test'],
         to: ['cerebras', 'gpt-oss-120b'],
         code: 'RATE_LIMIT',
       },
@@ -319,7 +319,7 @@ describe('provider-routed retry policy', () => {
     ])).toEqual([
       ['openrouter', 'deepseek/deepseek-chat'],
       ['groq', 'openai/gpt-oss-120b'],
-      ['google', 'gemini-3.8-flash'],
+      ['google', 'gemini-flash-test'],
       ['cerebras', 'gpt-oss-120b'],
     ])
     expect(agent.session.deriveMessages().at(-1)).toMatchObject({
@@ -1133,6 +1133,7 @@ describe('provider-routed retry policy', () => {
   it('accepts provider failover routes without moving retry policy off providers', async () => {
     expectTypeOf<{}>().toExtend<retryConfig>()
     expectTypeOf<{ failoverRoutes: { openrouter: [{ provider: 'groq'; model: 'openai/gpt-oss-120b' }] } }>().toExtend<retryConfig>()
+    expectTypeOf<{ failoverRoutes: { openrouter: [{ provider: 'groq' }] } }>().toExtend<retryConfig>()
     expectTypeOf<{ retryPolicy: { mode: 'always' } }>().not.toExtend<retryConfig>()
     const ctx = new Context()
     new SessionProjectionRegistry(ctx)
