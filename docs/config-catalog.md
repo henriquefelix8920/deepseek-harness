@@ -2672,7 +2672,7 @@ export interface ReplayModelConfig {
 ## `@deepseek-ai/dsh-llm-retry`
 
 - `inject`: `agents` · `sessionProjections`
-- `source`: [`packages/llm/llm-retry/src/index.ts:35`](../packages/llm/llm-retry/src/index.ts)
+- `source`: [`packages/llm/llm-retry/src/index.ts:37`](../packages/llm/llm-retry/src/index.ts)
 
 ```ts config-catalog
 /**
@@ -2680,12 +2680,15 @@ export interface ReplayModelConfig {
  * → Cerebras route order remains active unless a source provider is overridden.
  */
 export interface Config {
+  /** Per-source-provider replacement targets, in failover order. */
   readonly failoverRoutes?: Readonly<Record<string, readonly FailoverTarget[]>>
 }
 
 /** One exact provider/model route the agent may use after a transient failure. */
 export interface FailoverTarget {
+  /** Registered provider route key. */
   readonly provider: string
+  /** Exact model id exposed by that provider. */
   readonly model: string
 }
 ```
