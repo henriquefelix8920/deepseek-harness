@@ -315,6 +315,9 @@ export async function apply(ctx: Context, config: Config = {}, internals: RetryI
         toModel: selectedModel.id,
         failure,
       } satisfies LlmFailoverEventData)
+      // A synchronous session-event listener may cancel the turn while the
+      // failover record is appended. Do not persist a route change after that.
+      if (signal.aborted || lifetime.signal.aborted || ctx.fiber.uid === null) return
       agent.model.select(nextSelection)
       ctx.logger.info(
         `llm-retry: switching agent "${agent.id}" from "${provider}/${selection.model}" to "${target.provider}/${selectedModel.id}" after ${failure.code}`,
