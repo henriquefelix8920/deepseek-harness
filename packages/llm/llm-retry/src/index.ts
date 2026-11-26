@@ -9,12 +9,12 @@ import { randomUUID } from 'node:crypto'
 import type { Context, Events } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { z as zod } from 'zod'
-import type { Agent, RequestErrorAction } from '@deepseek-ai/dsh-agent'
+import type { Agent, ModelSelection, RequestErrorAction } from '@deepseek-ai/dsh-agent'
 import type { LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { RetryId } from './brand.ts'
-import type { LlmRetryEventData } from './types.ts'
+import type { LlmFailoverEventData, LlmRetryEventData } from './types.ts'
 
 export type { LlmRetryEventData, LlmRetryStartedEventData } from './types.ts'
 export { RetryId } from './brand.ts'
@@ -22,19 +22,84 @@ export { RetryId } from './brand.ts'
 export const name = 'llm-retry'
 export const inject = ['agents', 'sessionProjections']
 
-/** This policy executor has no config; providers own `retryPolicy`. */
-export type Config = Readonly<Record<string, never>>
+/** One exact provider/model route the agent may use after a transient failure. */
+export interface FailoverTarget {
+  readonly provider: string
+  readonly model: string
+}
+
+/**
+ * Optional provider failover overrides. The built-in OpenRouter → Groq → Gemini
+ * → Cerebras route order remains active unless a source provider is overridden.
+ */
+export interface Config {
+  readonly failoverRoutes?: Readonly<Record<string, readonly FailoverTarget[]>>
+}
+
+const failoverTargetSchema = z.object({
+  provider: z.string().min(1).required(),
+  model: z.string().min(1).required(),
+})
 
 /** Runtime schema for {@link Config}. */
-export const Config = z.object({}) as unknown as z<Config>
+export const Config = z.object({
+  failoverRoutes: z.dict(z.array(failoverTargetSchema)),
+}) as unknown as z<Config>
 
-function validateConfig(config: Config): void {
-  const [key] = Object.keys(config)
-  if (key === undefined) return
-  if (key === 'retryPolicy') {
-    throw new Error('llm-retry: retryPolicy belongs under each provider configuration')
+/** Default routes use provider-native ids with tool/function calling support. */
+const DEFAULT_FAILOVER_ROUTES: Readonly<Record<string, readonly FailoverTarget[]>> = {
+  openrouter: [
+    { provider: 'groq', model: 'openai/gpt-oss-120b' },
+    { provider: 'google', model: 'gemini-3.8-flash' },
+    { provider: 'cerebras', model: 'gpt-oss-120b' },
+  ],
+  groq: [
+    { provider: 'google', model: 'gemini-3.8-flash' },
+    { provider: 'cerebras', model: 'gpt-oss-120b' },
+  ],
+  google: [
+    { provider: 'cerebras', model: 'gpt-oss-120b' },
+  ],
+}
+
+const FAILOVER_CODES = new Set([
+  'EMPTY_RESPONSE',
+  'RATE_LIMIT',
+  'QUOTA',
+  'SERVER',
+  'TIMEOUT',
+  'TRANSPORT',
+])
+
+/** Select failures for which another provider is a safer recovery than the same route. */
+function isFailoverFailure(failure: LlmFailure): boolean {
+  return FAILOVER_CODES.has(failure.code)
+    || failure.status === 429
+    || (failure.status !== undefined && failure.status >= 500)
+}
+
+/** Validate route overrides without allowing an unknown executor-level retry policy. */
+function validateConfig(config: Config): Config {
+  for (const key of Object.keys(config)) {
+    if (key === 'retryPolicy') {
+      throw new Error('llm-retry: retryPolicy belongs under each provider configuration')
+    }
+    if (key !== 'failoverRoutes') throw new Error(`llm-retry: unknown key "${key}"`)
   }
-  throw new Error(`llm-retry: unknown key "${key}"`)
+  const validated = Config(config)
+  for (const [source, targets] of Object.entries(validated.failoverRoutes ?? {})) {
+    const seen = new Set<string>()
+    for (const target of targets) {
+      if (target.provider === source) {
+        throw new Error(`llm-retry: failover route "${source}" cannot target itself`)
+      }
+      if (seen.has(target.provider)) {
+        throw new Error(`llm-retry: failover route "${source}" repeats target "${target.provider}"`)
+      }
+      seen.add(target.provider)
+    }
+  }
+  return validated
 }
 
 /** Non-serializable hooks used to make timing policy deterministic in tests. */
@@ -119,7 +184,8 @@ const llmRetryStateSchema: zod.ZodType<LlmRetryState> = zod.record(zod.string(),
  * @returns when recovery listeners and their projection are ready.
  */
 export async function apply(ctx: Context, config: Config = {}, internals: RetryInternals = {}): Promise<void> {
-  validateConfig(config)
+  const validatedConfig = validateConfig(config)
+  const failoverRoutes = { ...DEFAULT_FAILOVER_ROUTES, ...validatedConfig.failoverRoutes }
   const projectionReady = ctx.sessionProjections.register({
     key: 'llmRetry',
     stateVersion: 1,
@@ -188,13 +254,71 @@ export async function apply(ctx: Context, config: Config = {}, internals: RetryI
     return { kind: 'retry' }
   }
 
+  async function tryFailover(
+    agent: Agent,
+    turn: number,
+    step: number,
+    provider: string,
+    failure: LlmFailure,
+    signal: AbortSignal,
+  ): Promise<RequestErrorAction> {
+    if (!isFailoverFailure(failure)) return
+    const targets = failoverRoutes[provider]
+    if (targets === undefined || targets.length === 0) return
+    const selection = agent.model.current()
+    if (selection === undefined || selection.provider !== provider) return
+
+    // Failover is monotone within one open step, even if a route override cycles.
+    const attempted = new Set<string>([provider])
+    for (const event of agent.session.snapshotEvents()) {
+      if (event.type !== 'llm/failover' || event.data.turn !== turn || event.data.step !== step) continue
+      attempted.add(event.data.fromProvider)
+      attempted.add(event.data.toProvider)
+    }
+
+    for (const target of targets) {
+      if (attempted.has(target.provider)) continue
+      if (signal.aborted || lifetime.signal.aborted || ctx.fiber.uid === null) return
+      let models
+      try {
+        // listModels returns no entries for routes whose credentials are not configured.
+        models = await agent.ctx.llm.listModels(target.provider)
+      } catch {
+        continue
+      }
+      if (signal.aborted || lifetime.signal.aborted || ctx.fiber.uid === null) return
+      if (!models.some(model => model.id === target.model)) continue
+
+      const latest = agent.model.current()
+      if (latest === undefined || latest.provider !== provider || latest.model !== selection.model) return
+      const nextSelection: ModelSelection = { provider: target.provider, model: target.model }
+      agent.session.append('llm/failover', {
+        turn,
+        step,
+        fromProvider: provider,
+        fromModel: selection.model,
+        toProvider: target.provider,
+        toModel: target.model,
+        failure,
+      } satisfies LlmFailoverEventData)
+      agent.model.select(nextSelection)
+      ctx.logger.info(
+        `llm-retry: switching agent "${agent.id}" from "${provider}/${selection.model}" to "${target.provider}/${target.model}" after ${failure.code}`,
+      )
+      return { kind: 'retry' }
+    }
+  }
+
   async function recover(
     { agent, turn, step, provider, failure, retryPolicy: policy, signal }: Parameters<Events['agent/request-error']>[0],
     next: () => Promise<RequestErrorAction>,
   ): Promise<RequestErrorAction> {
-    if (policy === undefined) return next()
     const llmRetryProjectionHandle = await projectionReady
     if (signal.aborted || ctx.fiber.uid === null || lifetime.signal.aborted) return
+    const failover = await tryFailover(agent, turn, step, provider, failure, signal)
+    if (failover !== undefined) return failover
+    if (signal.aborted || ctx.fiber.uid === null || lifetime.signal.aborted) return
+    if (policy === undefined) return next()
     if (policy.mode === 'always') {
       const fusedSignal = AbortSignal.any([signal, lifetime.signal])
       // The loop and plugin lifetime stay open until delegated recovery settles.
