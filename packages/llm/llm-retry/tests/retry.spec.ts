@@ -8,6 +8,7 @@ import type {
   AlwaysRetryPolicyConfig,
   BackoffConfig,
   GenerateOptions,
+  LlmModelInfo,
   NormalRetryPolicyConfig,
   ResolvedRetryPolicy,
   RetryPolicyConfig,
@@ -46,6 +47,15 @@ class ScriptedAdapter extends LlmAdapter {
     if (entry === undefined) throw new Error('retry test script exhausted')
     if (entry instanceof Error) throw entry
     yield* entry
+  }
+
+  override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    const id = ({
+      groq: 'openai/gpt-oss-120b',
+      google: 'gemini-3.8-flash',
+      cerebras: 'gpt-oss-120b',
+    } as const)[provider as 'groq' | 'google' | 'cerebras']
+    return Promise.resolve(id === undefined ? [] : [{ provider, id, name: id }])
   }
 
   configureRetryPolicies(
@@ -251,6 +261,66 @@ describe('provider-routed retry policy', () => {
       role: 'assistant',
       content: [{ type: 'text', text: 'done' }],
       source: { kind: 'model', provider: 'mock', model: 'mock' },
+    })
+  })
+
+  it('fails over OpenRouter → Groq → Gemini → Cerebras and records each route switch', async () => {
+    const adapter = new ScriptedAdapter([
+      new LlmError('free-model daily limit reached', 'RATE_LIMIT', { status: 429 }),
+      new LlmError('Groq temporarily unavailable', 'SERVER', { status: 503 }),
+      new LlmError('Gemini rate limit reached', 'RATE_LIMIT', { status: 429 }),
+      textResponse('recovered on Cerebras'),
+    ])
+    ;({ ctx: context } = await harness(adapter))
+    context.llm.registerAdapter(['openrouter', 'groq', 'google', 'cerebras'], adapter)
+    const agent = await context.agentLoop.create(brandString<SessionId>('provider-failover-chain'), {
+      provider: 'openrouter',
+      model: 'deepseek/deepseek-chat',
+    })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    expect(adapter.requests.map(request => [request.provider, request.model])).toEqual([
+      ['openrouter', 'deepseek/deepseek-chat'],
+      ['groq', 'openai/gpt-oss-120b'],
+      ['google', 'gemini-3.8-flash'],
+      ['cerebras', 'gpt-oss-120b'],
+    ])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/failover').map(event => ({
+      from: [event.data.fromProvider, event.data.fromModel],
+      to: [event.data.toProvider, event.data.toModel],
+      code: event.data.failure.code,
+    }))).toEqual([
+      {
+        from: ['openrouter', 'deepseek/deepseek-chat'],
+        to: ['groq', 'openai/gpt-oss-120b'],
+        code: 'RATE_LIMIT',
+      },
+      {
+        from: ['groq', 'openai/gpt-oss-120b'],
+        to: ['google', 'gemini-3.8-flash'],
+        code: 'SERVER',
+      },
+      {
+        from: ['google', 'gemini-3.8-flash'],
+        to: ['cerebras', 'gpt-oss-120b'],
+        code: 'RATE_LIMIT',
+      },
+    ])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'request/header').map(event => [
+      event.data.header.config.provider,
+      event.data.header.config.model,
+    ])).toEqual([
+      ['openrouter', 'deepseek/deepseek-chat'],
+      ['groq', 'openai/gpt-oss-120b'],
+      ['google', 'gemini-3.8-flash'],
+      ['cerebras', 'gpt-oss-120b'],
+    ])
+    expect(agent.session.deriveMessages().at(-1)).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'recovered on Cerebras' }],
+      source: { kind: 'model', provider: 'cerebras', model: 'gpt-oss-120b' },
     })
   })
 
@@ -1055,8 +1125,9 @@ describe('provider-routed retry policy', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('rejects retry policy configured on the executor instead of a provider', async () => {
+  it('accepts provider failover routes without moving retry policy off providers', async () => {
     expectTypeOf<{}>().toExtend<retryConfig>()
+    expectTypeOf<{ failoverRoutes: { openrouter: [{ provider: 'groq'; model: 'openai/gpt-oss-120b' }] } }>().toExtend<retryConfig>()
     expectTypeOf<{ retryPolicy: { mode: 'always' } }>().not.toExtend<retryConfig>()
     const ctx = new Context()
     new SessionProjectionRegistry(ctx)
