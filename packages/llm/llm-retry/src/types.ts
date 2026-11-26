@@ -9,6 +9,8 @@ declare module '@deepseek-ai/dsh-session/types' {
     'llm/retry': LlmRetryEventData
     /** Durable transition written after a retry wait succeeds and before the next request attempt starts. */
     'llm/retry-started': LlmRetryStartedEventData
+    /** Durable record of one model-request failover to another configured provider route. */
+    'llm/failover': LlmFailoverEventData
   }
 }
 
@@ -45,4 +47,16 @@ export interface LlmRetryStartedEventData {
   turn: number
   step: number
   retry: number
+}
+
+
+/** One provider/model route switch admitted after a retryable model-request failure. */
+export interface LlmFailoverEventData {
+  turn: number
+  step: number
+  fromProvider: string
+  fromModel: string
+  toProvider: string
+  toModel: string
+  failure: LlmFailure
 }
